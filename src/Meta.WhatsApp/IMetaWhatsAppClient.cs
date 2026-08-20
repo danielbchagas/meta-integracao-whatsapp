@@ -7,6 +7,9 @@ namespace Meta.WhatsApp;
 /// <summary>Client for sending WhatsApp Cloud API messages and managing message templates.</summary>
 public interface IMetaWhatsAppClient
 {
+    /// <summary>The WhatsApp phone number ID used as the session channel.</summary>
+    string ChannelId { get; }
+
     Task<SendMessageResult> SendMessageAsync(
         OutboundMessage message,
         CancellationToken cancellationToken = default);
@@ -25,6 +28,13 @@ public interface IMetaWhatsAppClient
         CancellationToken cancellationToken = default);
 
     Task<ConversationSession> RegisterInboundMessageAsync(
+        InboundMessage message,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Registers an inbound message and reports whether it opened, renewed, or reactivated the session.
+    /// </summary>
+    Task<InboundRegistrationResult> RegisterInboundMessageWithResultAsync(
         InboundMessage message,
         CancellationToken cancellationToken = default);
 

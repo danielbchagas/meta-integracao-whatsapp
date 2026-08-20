@@ -111,12 +111,18 @@ public sealed class MetaWhatsAppClientReengagementTests
         await Assert.ThrowsAsync<ConversationSessionClosedException>(
             () => client.SendTextMessageAsync(Recipient, "Ainda não pode enviar texto livre"));
 
-        await client.RegisterInboundMessageAsync(new InboundMessage(
+        var registration = await client.RegisterInboundMessageWithResultAsync(new InboundMessage(
             Recipient,
             "wamid.new-inbound",
-            timeProvider.UtcNow.AddMinutes(1)));
+            timeProvider.UtcNow.AddMinutes(1),
+            ContextMessageId: "wamid.reengagement"));
         await client.SendTextMessageAsync(Recipient, "Nova resposta livre");
 
+        Assert.True(registration.WasReactivated);
+        Assert.Equal(InboundRegistrationOutcome.Reactivated, registration.Outcome);
+        Assert.Equal(ConversationSessionState.ReengagementPending, registration.PreviousState);
+        Assert.True(registration.IsReplyToReengagement);
+        Assert.Equal("attempt-1", registration.MatchedReengagementAttempt?.IdempotencyKey);
         var reopened = await client.GetOpenSessionAsync(Recipient);
         Assert.NotNull(reopened);
         Assert.Equal(ConversationSessionState.Open, reopened.State);
@@ -126,6 +132,58 @@ public sealed class MetaWhatsAppClientReengagementTests
         Assert.Equal(
             "wamid.new-inbound",
             textJson.RootElement.GetProperty("context").GetProperty("message_id").GetString());
+    }
+
+    [Fact]
+    public async Task RegisterInboundMessageWithResultAsync_ClassifiesOnlyOneConcurrentReactivation()
+    {
+        var handler = new TestHttpMessageHandler();
+        handler.EnqueueJson(ApprovedTemplateResponse());
+        handler.EnqueueJson(SentMessageResponse("wamid.reengagement"));
+        var store = new InMemoryConversationSessionStore();
+        var timeProvider = new TestTimeProvider(Now);
+        var httpClient = new HttpClient(handler);
+        var firstClient = CreateClient(httpClient, store, timeProvider);
+        var secondClient = CreateClient(httpClient, store, timeProvider);
+        await firstClient.RegisterInboundMessageAsync(new InboundMessage(Recipient, "wamid.inbound"));
+        timeProvider.UtcNow = Now.AddHours(25);
+        await firstClient.ReengageAsync(Request("attempt-1"));
+        var reply = new InboundMessage(
+            Recipient,
+            "wamid.customer-reply",
+            timeProvider.UtcNow.AddMinutes(1),
+            ContextMessageId: "wamid.reengagement");
+
+        var registrations = await Task.WhenAll(
+            firstClient.RegisterInboundMessageWithResultAsync(reply),
+            secondClient.RegisterInboundMessageWithResultAsync(reply));
+
+        Assert.Single(registrations, item => item.Outcome == InboundRegistrationOutcome.Reactivated);
+        Assert.Single(registrations, item => item.Outcome == InboundRegistrationOutcome.Duplicate);
+        Assert.All(registrations, item => Assert.Equal(ConversationSessionState.Open, item.Session.State));
+        var session = await firstClient.GetSessionAsync(Recipient);
+        Assert.Equal(2, session?.ProcessedInboundMessageIds.Count);
+    }
+
+    [Fact]
+    public async Task RegisterInboundMessageWithResultAsync_ReactivatesWithoutExplicitTemplateContext()
+    {
+        var handler = new TestHttpMessageHandler();
+        handler.EnqueueJson(ApprovedTemplateResponse());
+        handler.EnqueueJson(SentMessageResponse("wamid.reengagement"));
+        var timeProvider = new TestTimeProvider(Now);
+        var client = CreateClient(handler, timeProvider);
+        await client.RegisterInboundMessageAsync(new InboundMessage(Recipient, "wamid.inbound", Now));
+        timeProvider.UtcNow = Now.AddHours(25);
+        await client.ReengageAsync(Request("attempt-1"));
+
+        var registration = await client.RegisterInboundMessageWithResultAsync(
+            new InboundMessage(Recipient, "wamid.new-conversation", timeProvider.UtcNow.AddMinutes(1)));
+
+        Assert.True(registration.WasReactivated);
+        Assert.False(registration.IsReplyToReengagement);
+        Assert.Null(registration.ContextMessageId);
+        Assert.Equal(ConversationSessionState.Open, registration.Session.State);
     }
 
     [Fact]
@@ -150,6 +208,35 @@ public sealed class MetaWhatsAppClientReengagementTests
         Assert.Equal(ConversationSessionState.Expired, session?.State);
         Assert.Equal(ReengagementMessageStatus.Failed, session?.LastReengagementAttempt?.Status);
         Assert.Equal("131047", session?.LastReengagementAttempt?.ErrorCode);
+    }
+
+    [Fact]
+    public async Task RegisterReengagementStatusAsync_IgnoresOlderFailureWebhook()
+    {
+        var handler = new TestHttpMessageHandler();
+        handler.EnqueueJson(ApprovedTemplateResponse());
+        handler.EnqueueJson(SentMessageResponse("wamid.reengagement"));
+        var timeProvider = new TestTimeProvider(Now);
+        var client = CreateClient(handler, timeProvider);
+        await client.RegisterInboundMessageAsync(new InboundMessage(Recipient, "wamid.inbound", Now));
+        timeProvider.UtcNow = Now.AddHours(25);
+        await client.ReengageAsync(Request("attempt-1"));
+        await client.RegisterReengagementStatusAsync(new ReengagementStatusUpdate(
+            Recipient,
+            "wamid.reengagement",
+            ReengagementMessageStatus.Read,
+            timeProvider.UtcNow.AddMinutes(2)));
+
+        var session = await client.RegisterReengagementStatusAsync(new ReengagementStatusUpdate(
+            Recipient,
+            "wamid.reengagement",
+            ReengagementMessageStatus.Failed,
+            timeProvider.UtcNow.AddMinutes(1),
+            ErrorCode: "late-failure"));
+
+        Assert.Equal(ReengagementMessageStatus.Read, session?.LastReengagementAttempt?.Status);
+        Assert.Null(session?.LastReengagementAttempt?.ErrorCode);
+        Assert.Equal(ConversationSessionState.ReengagementPending, session?.State);
     }
 
     [Fact]

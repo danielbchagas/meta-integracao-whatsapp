@@ -13,11 +13,17 @@ public sealed record ConversationSession(
     ConversationSessionState State,
     IReadOnlyList<ReengagementAttempt> ReengagementAttempts)
 {
+    /// <summary>The outbound message explicitly referenced by the latest inbound reply.</summary>
+    public string? LastInboundContextMessageId { get; init; }
+
+    /// <summary>Recent inbound message identifiers retained for webhook idempotency.</summary>
+    public IReadOnlyList<string> ProcessedInboundMessageIds { get; init; } = [];
+
     public bool IsOpen(DateTimeOffset nowUtc) =>
         State == ConversationSessionState.Open && nowUtc < ExpiresAtUtc;
 
     public ReengagementAttempt? LastReengagementAttempt =>
-        ReengagementAttempts.LastOrDefault();
+        ReengagementAttempts.Count == 0 ? null : ReengagementAttempts[^1];
 }
 
 public enum ConversationSessionState

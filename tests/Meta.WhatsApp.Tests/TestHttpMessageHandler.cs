@@ -12,6 +12,8 @@ internal sealed class TestHttpMessageHandler : HttpMessageHandler
 
     public Func<CapturedRequest, HttpResponseMessage>? Responder { get; set; }
 
+    public Func<CapturedRequest, CancellationToken, Task<HttpResponseMessage>>? AsyncResponder { get; set; }
+
     public void EnqueueJson(string json, HttpStatusCode statusCode = HttpStatusCode.OK)
     {
         lock (_gate)
@@ -43,12 +45,14 @@ internal sealed class TestHttpMessageHandler : HttpMessageHandler
             body);
 
         Func<CapturedRequest, HttpResponseMessage>? responder;
+        Func<CapturedRequest, CancellationToken, Task<HttpResponseMessage>>? asyncResponder;
         HttpResponseMessage? response = null;
         lock (_gate)
         {
             Requests.Add(captured);
             responder = Responder;
-            if (responder is null)
+            asyncResponder = AsyncResponder;
+            if (responder is null && asyncResponder is null)
             {
                 if (_responses.Count == 0)
                 {
@@ -57,6 +61,11 @@ internal sealed class TestHttpMessageHandler : HttpMessageHandler
 
                 response = _responses.Dequeue();
             }
+        }
+
+        if (asyncResponder is not null)
+        {
+            return await asyncResponder(captured, cancellationToken);
         }
 
         return responder?.Invoke(captured) ?? response!;

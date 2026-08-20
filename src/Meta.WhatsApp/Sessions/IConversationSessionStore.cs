@@ -8,9 +8,12 @@ public interface IConversationSessionStore
         string recipient,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Atomically stores an inbound message without replacing a newer inbound message.</summary>
-    ValueTask<ConversationSession> RegisterInboundAsync(
+    /// <summary>
+    /// Atomically stores an inbound message, classifies the state transition, and prevents webhook duplicates.
+    /// </summary>
+    ValueTask<InboundRegistrationResult> RegisterInboundAsync(
         ConversationSession session,
+        int maxMessageHistory,
         CancellationToken cancellationToken = default);
 
     /// <summary>Atomically reserves a reengagement attempt and enforces idempotency and cooldown.</summary>

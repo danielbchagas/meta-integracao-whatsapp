@@ -82,6 +82,22 @@ Funcionalidade: Reengajamento depois do fechamento da janela
     Quando o cliente responder ao reengajamento
     Então a sessão deve estar aberta
     E o novo contexto deve ser a resposta do cliente
+    E o registro deve indicar que a sessão foi reativada
+    E a resposta deve estar correlacionada ao template de reengajamento
+
+  Cenário: Repetir o webhook da resposta não reativa a sessão duas vezes
+    Dado que o cliente já foi reengajado
+    Quando o webhook entregar duas vezes a mesma resposta do cliente
+    Então o primeiro registro deve indicar que a sessão foi reativada
+    E o segundo registro deve ser ignorado como duplicado
+    E a sessão deve estar aberta
+
+  Cenário: Uma nova mensagem sem contexto também reativa a sessão
+    Dado que o cliente já foi reengajado
+    Quando o cliente iniciar uma nova mensagem sem responder ao template
+    Então o registro deve indicar que a sessão foi reativada
+    E a resposta não deve estar correlacionada ao template de reengajamento
+    E a sessão deve estar aberta
 
   Cenário: Duas instâncias concorrentes não duplicam o reengajamento
     Dado que duas instâncias compartilham o armazenamento de sessões

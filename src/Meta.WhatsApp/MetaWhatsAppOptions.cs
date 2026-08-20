@@ -37,6 +37,9 @@ public sealed partial class MetaWhatsAppOptions
     /// <summary>Maximum number of reengagement attempts retained in each session.</summary>
     public int MaxReengagementHistory { get; init; } = 20;
 
+    /// <summary>Maximum number of inbound message IDs retained for webhook idempotency.</summary>
+    public int MaxInboundMessageHistory { get; init; } = 100;
+
     internal void Validate()
     {
         RequireValue(AccessToken, nameof(AccessToken));
@@ -51,7 +54,9 @@ public sealed partial class MetaWhatsAppOptions
                 nameof(GraphApiVersion));
         }
 
-        if (!GraphApiBaseAddress.IsAbsoluteUri || GraphApiBaseAddress.Scheme != Uri.UriSchemeHttps)
+        if (GraphApiBaseAddress is null ||
+            !GraphApiBaseAddress.IsAbsoluteUri ||
+            GraphApiBaseAddress.Scheme != Uri.UriSchemeHttps)
         {
             throw new ArgumentException("GraphApiBaseAddress must be an absolute HTTPS URI.", nameof(GraphApiBaseAddress));
         }
@@ -69,6 +74,13 @@ public sealed partial class MetaWhatsAppOptions
         if (MaxReengagementHistory <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(MaxReengagementHistory), "History size must be positive.");
+        }
+
+        if (MaxInboundMessageHistory <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(MaxInboundMessageHistory),
+                "Inbound message history size must be positive.");
         }
     }
 
