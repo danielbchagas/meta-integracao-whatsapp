@@ -4,4 +4,5 @@ namespace Meta.WhatsApp.Sessions;
 public sealed record InboundMessage(
     string Recipient,
     string MessageId,
-    DateTimeOffset? ReceivedAtUtc = null);
+    DateTimeOffset? ReceivedAtUtc = null,
+    string? ContextMessageId = null);

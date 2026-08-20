@@ -13,7 +13,8 @@ public sealed class MetaWhatsAppApiException : Exception
         string? errorType = null,
         string? traceId = null,
         string? responseBody = null,
-        Exception? innerException = null)
+        Exception? innerException = null,
+        TimeSpan? retryAfter = null)
         : base(message, innerException)
     {
         StatusCode = statusCode;
@@ -22,6 +23,7 @@ public sealed class MetaWhatsAppApiException : Exception
         ErrorType = errorType;
         TraceId = traceId;
         ResponseBody = responseBody;
+        RetryAfter = retryAfter;
     }
 
     public HttpStatusCode StatusCode { get; }
@@ -35,4 +37,15 @@ public sealed class MetaWhatsAppApiException : Exception
     public string? TraceId { get; }
 
     public string? ResponseBody { get; }
+
+    /// <summary>Delay requested by Meta through the Retry-After response header.</summary>
+    public TimeSpan? RetryAfter { get; }
+
+    /// <summary>
+    /// Indicates a timeout, rate limit, or server-side failure. Retrying message sends still requires
+    /// application-level idempotency because delivery may have occurred before the failure was observed.
+    /// </summary>
+    public bool IsTransient =>
+        StatusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests ||
+        (int)StatusCode >= 500;
 }

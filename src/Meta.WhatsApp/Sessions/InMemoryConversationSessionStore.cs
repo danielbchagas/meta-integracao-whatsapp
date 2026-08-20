@@ -19,27 +19,84 @@ public sealed class InMemoryConversationSessionStore : IConversationSessionStore
         }
     }
 
-    public ValueTask<ConversationSession> RegisterInboundAsync(
+    public ValueTask<InboundRegistrationResult> RegisterInboundAsync(
         ConversationSession session,
+        int maxMessageHistory,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxMessageHistory);
+
         lock (_gate)
         {
             var key = (session.ChannelId, session.Recipient);
-            if (_sessions.TryGetValue(key, out var existing) &&
-                existing.LastInboundMessageAtUtc > session.LastInboundMessageAtUtc)
+            if (!_sessions.TryGetValue(key, out var existing))
             {
-                return ValueTask.FromResult(existing);
+                var opened = session with
+                {
+                    State = ConversationSessionState.Open,
+                    ProcessedInboundMessageIds = AppendMessageId(
+                        [],
+                        session.LastInboundMessageId,
+                        maxMessageHistory)
+                };
+                _sessions[key] = opened;
+                return ValueTask.FromResult(new InboundRegistrationResult(
+                    opened,
+                    PreviousState: null,
+                    InboundRegistrationOutcome.Opened,
+                    session.LastInboundMessageId,
+                    session.LastInboundContextMessageId));
             }
 
+            var previousState = EffectiveStateAt(existing, session.LastInboundMessageAtUtc);
+            var processedMessageIds = existing.ProcessedInboundMessageIds.Count == 0
+                ? [existing.LastInboundMessageId]
+                : existing.ProcessedInboundMessageIds;
+
+            if (processedMessageIds.Contains(session.LastInboundMessageId, StringComparer.Ordinal))
+            {
+                return ValueTask.FromResult(new InboundRegistrationResult(
+                    existing,
+                    previousState,
+                    InboundRegistrationOutcome.Duplicate,
+                    session.LastInboundMessageId,
+                    session.LastInboundContextMessageId));
+            }
+
+            var updatedHistory = AppendMessageId(
+                processedMessageIds,
+                session.LastInboundMessageId,
+                maxMessageHistory);
+            if (existing.LastInboundMessageAtUtc > session.LastInboundMessageAtUtc)
+            {
+                var preserved = existing with { ProcessedInboundMessageIds = updatedHistory };
+                _sessions[key] = preserved;
+                return ValueTask.FromResult(new InboundRegistrationResult(
+                    preserved,
+                    previousState,
+                    InboundRegistrationOutcome.IgnoredOutOfOrder,
+                    session.LastInboundMessageId,
+                    session.LastInboundContextMessageId));
+            }
+
+            var outcome = previousState is ConversationSessionState.Expired or
+                ConversationSessionState.ReengagementPending
+                    ? InboundRegistrationOutcome.Reactivated
+                    : InboundRegistrationOutcome.Renewed;
             var stored = session with
             {
                 State = ConversationSessionState.Open,
-                ReengagementAttempts = existing?.ReengagementAttempts ?? session.ReengagementAttempts
+                ReengagementAttempts = existing.ReengagementAttempts,
+                ProcessedInboundMessageIds = updatedHistory
             };
             _sessions[key] = stored;
-            return ValueTask.FromResult(stored);
+            return ValueTask.FromResult(new InboundRegistrationResult(
+                stored,
+                previousState,
+                outcome,
+                session.LastInboundMessageId,
+                session.LastInboundContextMessageId));
         }
     }
 
@@ -234,7 +291,8 @@ public sealed class InMemoryConversationSessionStore : IConversationSessionStore
         }
 
         var current = attempts[index];
-        if (IsStatusRegression(current.Status, status))
+        if (statusUpdatedAtUtc < current.StatusUpdatedAtUtc ||
+            IsStatusRegression(current.Status, status))
         {
             return session;
         }
@@ -264,6 +322,23 @@ public sealed class InMemoryConversationSessionStore : IConversationSessionStore
         session.State == ConversationSessionState.Open && session.ExpiresAtUtc <= nowUtc
             ? session with { State = ConversationSessionState.Expired }
             : session;
+
+    private static ConversationSessionState EffectiveStateAt(
+        ConversationSession session,
+        DateTimeOffset occurredAtUtc) =>
+        session.State == ConversationSessionState.Open && session.ExpiresAtUtc <= occurredAtUtc
+            ? ConversationSessionState.Expired
+            : session.State;
+
+    private static string[] AppendMessageId(
+        IReadOnlyList<string> messageIds,
+        string messageId,
+        int maxHistory) =>
+        messageIds
+            .Append(messageId)
+            .Distinct(StringComparer.Ordinal)
+            .TakeLast(maxHistory)
+            .ToArray();
 
     private static bool IsStatusRegression(
         ReengagementMessageStatus current,

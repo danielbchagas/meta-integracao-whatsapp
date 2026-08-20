@@ -62,6 +62,131 @@ public sealed class MetaWhatsAppClientMessageTests
     }
 
     [Fact]
+    public async Task RegisterInboundMessageWithResultAsync_ClassifiesInboundMessageLifecycle()
+    {
+        var handler = new TestHttpMessageHandler();
+        var timeProvider = new TestTimeProvider(Now);
+        var client = CreateClient(handler, timeProvider);
+
+        var opened = await client.RegisterInboundMessageWithResultAsync(
+            new InboundMessage("5511999990000", "wamid.first", Now));
+        var renewed = await client.RegisterInboundMessageWithResultAsync(
+            new InboundMessage("5511999990000", "wamid.second", Now.AddMinutes(2)));
+        var duplicate = await client.RegisterInboundMessageWithResultAsync(
+            new InboundMessage("5511999990000", "wamid.second", Now.AddMinutes(2)));
+        var outOfOrder = await client.RegisterInboundMessageWithResultAsync(
+            new InboundMessage("5511999990000", "wamid.older", Now.AddMinutes(1)));
+
+        Assert.Equal(InboundRegistrationOutcome.Opened, opened.Outcome);
+        Assert.Null(opened.PreviousState);
+        Assert.Equal(InboundRegistrationOutcome.Renewed, renewed.Outcome);
+        Assert.Equal(ConversationSessionState.Open, renewed.PreviousState);
+        Assert.Equal(InboundRegistrationOutcome.Duplicate, duplicate.Outcome);
+        Assert.Equal(InboundRegistrationOutcome.IgnoredOutOfOrder, outOfOrder.Outcome);
+        Assert.Equal("wamid.second", outOfOrder.Session.LastInboundMessageId);
+        Assert.Equal(3, outOfOrder.Session.ProcessedInboundMessageIds.Count);
+    }
+
+    [Fact]
+    public async Task SendTextMessageAsync_DoesNotRenewCustomerServiceWindow()
+    {
+        var handler = new TestHttpMessageHandler();
+        handler.EnqueueJson(SentMessageResponse("wamid.out"));
+        var timeProvider = new TestTimeProvider(Now);
+        var client = CreateClient(handler, timeProvider);
+
+        var openedSession = await client.RegisterInboundMessageAsync(
+            new InboundMessage("5511999990000", "wamid.inbound"));
+        timeProvider.UtcNow = Now.AddHours(23).AddMinutes(59);
+
+        await client.SendTextMessageAsync("5511999990000", "Mensagem antes do fechamento");
+
+        var sessionAfterSend = await client.GetSessionAsync("5511999990000");
+        Assert.Equal(openedSession.ExpiresAtUtc, sessionAfterSend?.ExpiresAtUtc);
+
+        timeProvider.UtcNow = Now.AddHours(24).AddMinutes(1);
+        await Assert.ThrowsAsync<ConversationSessionClosedException>(
+            () => client.SendTextMessageAsync("5511999990000", "Mensagem após o fechamento"));
+
+        Assert.Single(handler.Requests);
+        var expiredSession = await client.GetSessionAsync("5511999990000");
+        Assert.Equal(ConversationSessionState.Expired, expiredSession?.State);
+    }
+
+    [Fact]
+    public async Task CustomerServiceWindow_IsClosedAtTheExactExpirationInstant()
+    {
+        var handler = new TestHttpMessageHandler();
+        var timeProvider = new TestTimeProvider(Now);
+        var client = CreateClient(handler, timeProvider);
+        await client.RegisterInboundMessageAsync(
+            new InboundMessage("5511999990000", "wamid.inbound", Now));
+        timeProvider.UtcNow = Now.AddHours(24);
+
+        Assert.Null(await client.GetOpenSessionAsync("5511999990000"));
+        await Assert.ThrowsAsync<ConversationSessionClosedException>(() =>
+            client.SendTextMessageAsync("5511999990000", "Mensagem no limite exato"));
+        Assert.Equal(
+            ConversationSessionState.Expired,
+            (await client.GetSessionAsync("5511999990000"))?.State);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task RegisterInboundMessageWithResultAsync_OpensManyRecipientsConcurrently()
+    {
+        var handler = new TestHttpMessageHandler();
+        var store = new InMemoryConversationSessionStore();
+        var client = CreateClient(handler, store: store);
+        var recipients = Enumerable.Range(1, 100)
+            .Select(index => $"5511999{index:0000}")
+            .ToArray();
+
+        var registrations = await Task.WhenAll(recipients.Select((recipient, index) =>
+            client.RegisterInboundMessageWithResultAsync(
+                new InboundMessage(recipient, $"wamid.{index}", Now))));
+
+        Assert.All(registrations, registration =>
+            Assert.Equal(InboundRegistrationOutcome.Opened, registration.Outcome));
+        Assert.Equal(100, registrations.Select(item => item.Session.Recipient).Distinct().Count());
+        foreach (var recipient in recipients)
+        {
+            Assert.NotNull(await client.GetOpenSessionAsync(recipient));
+        }
+    }
+
+    [Fact]
+    public async Task RegisterInboundMessageWithResultAsync_SerializesDistinctMessagesWithSameTimestamp()
+    {
+        var client = CreateClient(new TestHttpMessageHandler());
+        var registrations = await Task.WhenAll(
+            client.RegisterInboundMessageWithResultAsync(
+                new InboundMessage("5511999990000", "wamid.first", Now)),
+            client.RegisterInboundMessageWithResultAsync(
+                new InboundMessage("5511999990000", "wamid.second", Now)));
+
+        Assert.Single(registrations, item => item.Outcome == InboundRegistrationOutcome.Opened);
+        var renewed = Assert.Single(
+            registrations,
+            item => item.Outcome == InboundRegistrationOutcome.Renewed);
+        Assert.Equal(2, renewed.Session.ProcessedInboundMessageIds.Count);
+    }
+
+    [Fact]
+    public async Task RegisterInboundMessageWithResultAsync_TrimsIdempotencyHistoryToConfiguredLimit()
+    {
+        var client = CreateClient(new TestHttpMessageHandler(), maxInboundMessageHistory: 2);
+
+        await client.RegisterInboundMessageAsync(new InboundMessage("5511999990000", "wamid.1", Now));
+        await client.RegisterInboundMessageAsync(
+            new InboundMessage("5511999990000", "wamid.2", Now.AddMinutes(1)));
+        var registration = await client.RegisterInboundMessageWithResultAsync(
+            new InboundMessage("5511999990000", "wamid.3", Now.AddMinutes(2)));
+
+        Assert.Equal(["wamid.2", "wamid.3"], registration.Session.ProcessedInboundMessageIds);
+    }
+
+    [Fact]
     public async Task SendTextMessageAsync_RejectsFreeFormMessageWhenSessionIsClosed()
     {
         var handler = new TestHttpMessageHandler();
@@ -166,7 +291,9 @@ public sealed class MetaWhatsAppClientMessageTests
 
     private static MetaWhatsAppClient CreateClient(
         TestHttpMessageHandler handler,
-        TestTimeProvider? timeProvider = null) =>
+        TestTimeProvider? timeProvider = null,
+        IConversationSessionStore? store = null,
+        int maxInboundMessageHistory = 100) =>
         new(
             new HttpClient(handler),
             new MetaWhatsAppOptions
@@ -174,8 +301,10 @@ public sealed class MetaWhatsAppClientMessageTests
                 AccessToken = "access-token",
                 PhoneNumberId = "phone-id",
                 BusinessAccountId = "waba-id",
-                GraphApiVersion = "v23.0"
+                GraphApiVersion = "v23.0",
+                MaxInboundMessageHistory = maxInboundMessageHistory
             },
+            store,
             timeProvider: timeProvider ?? new TestTimeProvider(Now));
 
     private static string SentMessageResponse(string messageId) =>

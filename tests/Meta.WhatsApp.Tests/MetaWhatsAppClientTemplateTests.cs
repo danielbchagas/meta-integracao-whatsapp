@@ -110,6 +110,55 @@ public sealed class MetaWhatsAppClientTemplateTests
         Assert.Contains("after=cursor-2", handler.Requests[1].Uri.Query);
     }
 
+    [Fact]
+    public async Task GetTemplatesAsync_StopsWhenMetaRepeatsPaginationCursor()
+    {
+        var repeatedPage =
+            """
+            {
+              "data": [],
+              "paging": {
+                "cursors": { "after":"same-cursor" },
+                "next":"https://graph.facebook.com/v23.0/waba-id/message_templates?after=same-cursor"
+              }
+            }
+            """;
+        var handler = new TestHttpMessageHandler();
+        handler.EnqueueJson(repeatedPage);
+        handler.EnqueueJson(repeatedPage);
+        var client = CreateClient(handler);
+
+        var templates = await client.GetTemplatesAsync();
+
+        Assert.Empty(templates);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task GetTemplateByIdAsync_ReturnsNullForNotFound()
+    {
+        var handler = new TestHttpMessageHandler();
+        handler.EnqueueJson(
+            "{\"error\":{\"message\":\"Template not found\",\"code\":100}}",
+            System.Net.HttpStatusCode.NotFound);
+        var client = CreateClient(handler);
+
+        var template = await client.GetTemplateByIdAsync("missing-template");
+
+        Assert.Null(template);
+    }
+
+    [Fact]
+    public async Task UpdateTemplateAsync_RejectsUnconfirmedUpdate()
+    {
+        var handler = new TestHttpMessageHandler();
+        handler.EnqueueJson("{\"success\":false}");
+        var client = CreateClient(handler);
+
+        await Assert.ThrowsAsync<Meta.WhatsApp.Exceptions.MetaWhatsAppApiException>(() =>
+            client.UpdateTemplateAsync("template-id", DesiredTemplate));
+    }
+
     private static MetaWhatsAppClient CreateClient(TestHttpMessageHandler handler) =>
         new(
             new HttpClient(handler),

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -30,6 +31,8 @@ public sealed class MetaWhatsAppClient : IMetaWhatsAppClient
     private readonly TimeProvider _timeProvider;
     private readonly Uri _versionedBaseAddress;
 
+    public string ChannelId => _options.PhoneNumberId;
+
     public MetaWhatsAppClient(
         HttpClient httpClient,
         MetaWhatsAppOptions options,
@@ -45,7 +48,7 @@ public sealed class MetaWhatsAppClient : IMetaWhatsAppClient
         _sessionStore = sessionStore ?? new InMemoryConversationSessionStore();
         _timeProvider = timeProvider ?? TimeProvider.System;
 
-        var baseAddress = options.GraphApiBaseAddress.AbsoluteUri.EndsWith("/", StringComparison.Ordinal)
+        var baseAddress = options.GraphApiBaseAddress.AbsoluteUri.EndsWith('/')
             ? options.GraphApiBaseAddress
             : new Uri(options.GraphApiBaseAddress.AbsoluteUri + '/', UriKind.Absolute);
         _versionedBaseAddress = new Uri(baseAddress, options.GraphApiVersion + '/');
@@ -124,16 +127,22 @@ public sealed class MetaWhatsAppClient : IMetaWhatsAppClient
                 cancellationToken)
             .ConfigureAwait(false);
 
-        var sentMessage = response.Messages.FirstOrDefault()
-            ?? throw new MetaWhatsAppApiException(
+        var sentMessage = response.Messages is { Count: > 0 }
+            ? response.Messages[0]
+            : throw new MetaWhatsAppApiException(
                 HttpStatusCode.OK,
                 "Meta returned a successful response without a message identifier.");
-        var contact = response.Contacts?.FirstOrDefault();
+        var contact = response.Contacts is { Count: > 0 } ? response.Contacts[0] : null;
 
         return new SendMessageResult(sentMessage.Id, contact?.WhatsAppId, contact?.Input);
     }
 
     public async Task<ConversationSession> RegisterInboundMessageAsync(
+        InboundMessage message,
+        CancellationToken cancellationToken = default) =>
+        (await RegisterInboundMessageWithResultAsync(message, cancellationToken).ConfigureAwait(false)).Session;
+
+    public async Task<InboundRegistrationResult> RegisterInboundMessageWithResultAsync(
         InboundMessage message,
         CancellationToken cancellationToken = default)
     {
@@ -152,9 +161,17 @@ public sealed class MetaWhatsAppClient : IMetaWhatsAppClient
             receivedAtUtc,
             receivedAtUtc.Add(_options.CustomerServiceWindow),
             ConversationSessionState.Open,
-            ReengagementAttempts: []);
+            ReengagementAttempts: [])
+        {
+            LastInboundContextMessageId = string.IsNullOrWhiteSpace(message.ContextMessageId)
+                ? null
+                : message.ContextMessageId,
+            ProcessedInboundMessageIds = [message.MessageId]
+        };
 
-        return await _sessionStore.RegisterInboundAsync(session, cancellationToken).ConfigureAwait(false);
+        return await _sessionStore
+            .RegisterInboundAsync(session, _options.MaxInboundMessageHistory, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<ConversationSession?> GetOpenSessionAsync(
@@ -277,7 +294,7 @@ public sealed class MetaWhatsAppClient : IMetaWhatsAppClient
             case ReengagementReservationOutcome.Reserved:
                 break;
             default:
-                throw new ArgumentOutOfRangeException(nameof(reservation.Outcome));
+                throw new InvalidOperationException($"Unknown reengagement reservation outcome: {reservation.Outcome}.");
         }
 
         try
@@ -318,7 +335,7 @@ public sealed class MetaWhatsAppClient : IMetaWhatsAppClient
                     request.IdempotencyKey,
                     ReengagementMessageStatus.Failed,
                     _timeProvider.GetUtcNow(),
-                    errorCode: exception.ErrorCode?.ToString(),
+                    errorCode: exception.ErrorCode?.ToString(CultureInfo.InvariantCulture),
                     errorMessage: exception.Message,
                     cancellationToken: CancellationToken.None)
                 .ConfigureAwait(false);
@@ -573,7 +590,11 @@ public sealed class MetaWhatsAppClient : IMetaWhatsAppClient
 
         if (!response.IsSuccessStatusCode)
         {
-            throw CreateApiException(response.StatusCode, response.ReasonPhrase, responseBody);
+            throw CreateApiException(
+                response.StatusCode,
+                response.ReasonPhrase,
+                responseBody,
+                response.Headers.RetryAfter);
         }
 
         try
@@ -591,11 +612,13 @@ public sealed class MetaWhatsAppClient : IMetaWhatsAppClient
         }
     }
 
-    private static MetaWhatsAppApiException CreateApiException(
+    private MetaWhatsAppApiException CreateApiException(
         HttpStatusCode statusCode,
         string? reasonPhrase,
-        string responseBody)
+        string responseBody,
+        RetryConditionHeaderValue? retryCondition)
     {
+        var retryAfter = GetRetryAfter(retryCondition);
         try
         {
             var envelope = JsonSerializer.Deserialize<GraphErrorEnvelope>(responseBody, SerializerOptions);
@@ -607,7 +630,8 @@ public sealed class MetaWhatsAppClient : IMetaWhatsAppClient
                 error?.ErrorSubcode,
                 error?.Type,
                 error?.TraceId,
-                responseBody);
+                responseBody,
+                retryAfter: retryAfter);
         }
         catch (JsonException exception)
         {
@@ -615,8 +639,25 @@ public sealed class MetaWhatsAppClient : IMetaWhatsAppClient
                 statusCode,
                 $"Meta Graph API returned {(int)statusCode} {reasonPhrase}.",
                 responseBody: responseBody,
-                innerException: exception);
+                innerException: exception,
+                retryAfter: retryAfter);
         }
+    }
+
+    private TimeSpan? GetRetryAfter(RetryConditionHeaderValue? retryCondition)
+    {
+        if (retryCondition?.Delta is { } delta)
+        {
+            return delta < TimeSpan.Zero ? TimeSpan.Zero : delta;
+        }
+
+        if (retryCondition?.Date is not { } date)
+        {
+            return null;
+        }
+
+        var delay = date - _timeProvider.GetUtcNow();
+        return delay < TimeSpan.Zero ? TimeSpan.Zero : delay;
     }
 
     private static string NormalizeRecipient(string recipient)

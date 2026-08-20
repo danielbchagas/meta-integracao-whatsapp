@@ -27,11 +27,14 @@ public sealed class ClientInteractionSteps
     private SendMessageResult? _messageResult;
     private ReengagementResult? _reengagementResult;
     private ReengagementResult? _secondReengagementResult;
+    private InboundRegistrationResult? _inboundRegistration;
+    private InboundRegistrationResult? _secondInboundRegistration;
     private IReadOnlyList<WhatsAppTemplate>? _templates;
     private WhatsAppTemplate? _template;
     private TemplateSynchronizationResult? _synchronization;
     private Exception? _exception;
     private string? _lastReengagementKey;
+    private IReadOnlyList<InboundRegistrationResult>? _concurrentInboundRegistrations;
 
     public ClientInteractionSteps()
     {
@@ -39,8 +42,11 @@ public sealed class ClientInteractionSteps
     }
 
     [When("o cliente enviar a primeira mensagem")]
-    public async Task WhenTheCustomerSendsTheFirstMessage() =>
-        _session = await RegisterInboundAsync("wamid.inbound-1");
+    public async Task WhenTheCustomerSendsTheFirstMessage()
+    {
+        _inboundRegistration = await RegisterInboundWithResultAsync("wamid.inbound-1");
+        _session = _inboundRegistration.Session;
+    }
 
     [Given("que o cliente possui uma sessão aberta")]
     [Given("que o cliente possui uma sessão aberta no canal principal")]
@@ -63,6 +69,10 @@ public sealed class ClientInteractionSteps
         Assert.Equal(PhoneNumberId, _session.ChannelId);
         Assert.Equal(Recipient, _session.Recipient);
     }
+
+    [Then("o registro deve indicar que a sessão foi aberta")]
+    public void ThenTheRegistrationMustIndicateTheSessionWasOpened() =>
+        Assert.Equal(InboundRegistrationOutcome.Opened, _inboundRegistration?.Outcome);
 
     [Given("que a Meta aceitará duas mensagens")]
     public void GivenMetaWillAcceptTwoMessages()
@@ -97,15 +107,32 @@ public sealed class ClientInteractionSteps
     [Then("duas mensagens devem ter sido enviadas para a Meta")]
     public void ThenTwoMessagesMustHaveBeenSentToMeta() => Assert.Equal(2, MessageRequests.Count);
 
+    [Then("apenas a primeira mensagem deve ter sido enviada para a Meta")]
+    public void ThenOnlyTheFirstMessageMustHaveBeenSentToMeta() => Assert.Single(MessageRequests);
+
     [Given("que se passaram 23 horas")]
     public void GivenTwentyThreeHoursHavePassed() => _timeProvider.Advance(TimeSpan.FromHours(23));
 
+    [Given("que se passaram 23 horas e 59 minutos")]
+    public void GivenTwentyThreeHoursAndFiftyNineMinutesHavePassed() =>
+        _timeProvider.Advance(TimeSpan.FromHours(23) + TimeSpan.FromMinutes(59));
+
+    [Given("que se passaram exatamente 24 horas")]
+    public void GivenExactlyTwentyFourHoursHavePassed() =>
+        _timeProvider.Advance(TimeSpan.FromHours(24));
+
     [When("o cliente enviar uma nova mensagem")]
-    public async Task WhenTheCustomerSendsANewMessage() =>
-        _session = await RegisterInboundAsync("wamid.inbound-new");
+    public async Task WhenTheCustomerSendsANewMessage()
+    {
+        _inboundRegistration = await RegisterInboundWithResultAsync("wamid.inbound-new");
+        _session = _inboundRegistration.Session;
+    }
 
     [When("se passarem mais 2 horas")]
     public void WhenTwoMoreHoursPass() => _timeProvider.Advance(TimeSpan.FromHours(2));
+
+    [When("se passarem mais 2 minutos")]
+    public void WhenTwoMoreMinutesPass() => _timeProvider.Advance(TimeSpan.FromMinutes(2));
 
     [Then("a sessão deve continuar aberta")]
     public async Task ThenTheSessionMustRemainOpen() => await ThenTheSessionMustBeOpen();
@@ -116,6 +143,10 @@ public sealed class ClientInteractionSteps
         _session = await _client.GetSessionAsync(Recipient);
         Assert.Equal("wamid.inbound-new", _session?.LastInboundMessageId);
     }
+
+    [Then("o registro deve indicar que a sessão foi renovada")]
+    public void ThenTheRegistrationMustIndicateTheSessionWasRenewed() =>
+        Assert.Equal(InboundRegistrationOutcome.Renewed, _inboundRegistration?.Outcome);
 
     [Given("que a janela de atendimento expirou")]
     public async Task GivenTheCustomerServiceWindowExpired()
@@ -149,6 +180,33 @@ public sealed class ClientInteractionSteps
 
     [Then("nenhuma mensagem deve ter sido enviada para a Meta")]
     public void ThenNoMessageMustHaveBeenSentToMeta() => Assert.Empty(MessageRequests);
+
+    [When("cem clientes enviarem mensagens simultaneamente")]
+    public async Task WhenOneHundredCustomersSendMessagesConcurrently()
+    {
+        _concurrentInboundRegistrations = await Task.WhenAll(
+            Enumerable.Range(1, 100).Select(index =>
+                _client.RegisterInboundMessageWithResultAsync(new InboundMessage(
+                    $"5511988{index:0000}",
+                    $"wamid.concurrent-{index}",
+                    _timeProvider.UtcNow))));
+    }
+
+    [Then("todos os clientes devem possuir sessões abertas e isoladas")]
+    public async Task ThenAllCustomersMustHaveOpenAndIsolatedSessions()
+    {
+        Assert.NotNull(_concurrentInboundRegistrations);
+        Assert.Equal(100, _concurrentInboundRegistrations.Count);
+        Assert.All(_concurrentInboundRegistrations, registration =>
+            Assert.Equal(InboundRegistrationOutcome.Opened, registration.Outcome));
+        Assert.Equal(
+            100,
+            _concurrentInboundRegistrations.Select(item => item.Session.Recipient).Distinct().Count());
+        foreach (var registration in _concurrentInboundRegistrations)
+        {
+            Assert.NotNull(await _client.GetOpenSessionAsync(registration.Session.Recipient));
+        }
+    }
 
     [When("o sistema fechar a sessão manualmente")]
     public async Task WhenTheSystemClosesTheSessionManually() =>
@@ -453,8 +511,13 @@ public sealed class ClientInteractionSteps
 
     [When("o cliente responder ao reengajamento")]
     [Given("que o cliente respondeu ao reengajamento")]
-    public async Task WhenTheCustomerRepliesToReengagement() =>
-        _session = await RegisterInboundAsync("wamid.customer-reply");
+    public async Task WhenTheCustomerRepliesToReengagement()
+    {
+        _inboundRegistration = await RegisterInboundWithResultAsync(
+            "wamid.customer-reply",
+            contextMessageId: "wamid.out-1");
+        _session = _inboundRegistration.Session;
+    }
 
     [Then("o novo contexto deve ser a resposta do cliente")]
     public async Task ThenTheNewContextMustBeTheCustomerReply()
@@ -462,6 +525,48 @@ public sealed class ClientInteractionSteps
         _session = await _client.GetSessionAsync(Recipient);
         Assert.Equal("wamid.customer-reply", _session?.LastInboundMessageId);
     }
+
+    [Then("o registro deve indicar que a sessão foi reativada")]
+    [Then("o primeiro registro deve indicar que a sessão foi reativada")]
+    public void ThenTheRegistrationMustIndicateTheSessionWasReactivated()
+    {
+        Assert.True(_inboundRegistration?.WasReactivated);
+        Assert.Equal(InboundRegistrationOutcome.Reactivated, _inboundRegistration?.Outcome);
+    }
+
+    [Then("a resposta deve estar correlacionada ao template de reengajamento")]
+    public void ThenTheReplyMustBeCorrelatedToTheReengagementTemplate()
+    {
+        Assert.True(_inboundRegistration?.IsReplyToReengagement);
+        Assert.Equal("wamid.out-1", _inboundRegistration?.Session.LastInboundContextMessageId);
+    }
+
+    [When("o webhook entregar duas vezes a mesma resposta do cliente")]
+    public async Task WhenTheWebhookDeliversTheSameCustomerReplyTwice()
+    {
+        _inboundRegistration = await RegisterInboundWithResultAsync(
+            "wamid.customer-reply",
+            contextMessageId: "wamid.out-1");
+        _secondInboundRegistration = await RegisterInboundWithResultAsync(
+            "wamid.customer-reply",
+            contextMessageId: "wamid.out-1");
+        _session = _secondInboundRegistration.Session;
+    }
+
+    [Then("o segundo registro deve ser ignorado como duplicado")]
+    public void ThenTheSecondRegistrationMustBeIgnoredAsDuplicate() =>
+        Assert.Equal(InboundRegistrationOutcome.Duplicate, _secondInboundRegistration?.Outcome);
+
+    [When("o cliente iniciar uma nova mensagem sem responder ao template")]
+    public async Task WhenTheCustomerStartsANewMessageWithoutReplyingToTheTemplate()
+    {
+        _inboundRegistration = await RegisterInboundWithResultAsync("wamid.new-conversation");
+        _session = _inboundRegistration.Session;
+    }
+
+    [Then("a resposta não deve estar correlacionada ao template de reengajamento")]
+    public void ThenTheReplyMustNotBeCorrelatedToTheReengagementTemplate() =>
+        Assert.False(_inboundRegistration?.IsReplyToReengagement);
 
     [Given("que duas instâncias compartilham o armazenamento de sessões")]
     public void GivenTwoInstancesShareTheSessionStore() =>
@@ -650,6 +755,15 @@ public sealed class ClientInteractionSteps
 
     private Task<ConversationSession> RegisterInboundAsync(string messageId) =>
         _client.RegisterInboundMessageAsync(new InboundMessage(Recipient, messageId, _timeProvider.UtcNow));
+
+    private Task<InboundRegistrationResult> RegisterInboundWithResultAsync(
+        string messageId,
+        string? contextMessageId = null) =>
+        _client.RegisterInboundMessageWithResultAsync(new InboundMessage(
+            Recipient,
+            messageId,
+            _timeProvider.UtcNow,
+            contextMessageId));
 
     private void EnqueueSentMessage(string messageId) =>
         _handler.EnqueueJson(SentMessageResponse(messageId));

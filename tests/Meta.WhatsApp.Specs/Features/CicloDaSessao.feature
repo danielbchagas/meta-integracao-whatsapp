@@ -10,6 +10,7 @@ Funcionalidade: Ciclo de vida da sessão de atendimento
     Quando o cliente enviar a primeira mensagem
     Então a sessão deve estar aberta
     E a sessão deve pertencer ao mesmo canal e cliente
+    E o registro deve indicar que a sessão foi aberta
 
   Cenário: Mensagens livres sucessivas reutilizam a sessão aberta
     Dado que o cliente possui uma sessão aberta
@@ -25,6 +26,18 @@ Funcionalidade: Ciclo de vida da sessão de atendimento
     E se passarem mais 2 horas
     Então a sessão deve continuar aberta
     E o contexto atual deve ser a nova mensagem recebida
+    E o registro deve indicar que a sessão foi renovada
+
+  Cenário: Uma mensagem enviada pelo sistema não renova a janela
+    Dado que o cliente possui uma sessão aberta
+    E que a Meta aceitará uma mensagem
+    E que se passaram 23 horas e 59 minutos
+    Quando o sistema enviar uma mensagem de texto livre
+    E se passarem mais 2 minutos
+    E o sistema tentar enviar texto livre
+    Então apenas a primeira mensagem deve ter sido enviada para a Meta
+    E o envio deve falhar porque a sessão está fechada
+    E a sessão deve estar preservada como expirada
 
   Cenário: A sessão expirada é preservada e bloqueia texto livre
     Dado que o cliente possui uma sessão aberta
@@ -33,6 +46,17 @@ Funcionalidade: Ciclo de vida da sessão de atendimento
     Então o envio deve falhar porque a sessão está fechada
     E a sessão deve estar preservada como expirada
     E nenhuma mensagem deve ter sido enviada para a Meta
+
+  Cenário: A janela está fechada no instante exato de 24 horas
+    Dado que o cliente possui uma sessão aberta
+    E que se passaram exatamente 24 horas
+    Quando o sistema tentar enviar texto livre
+    Então o envio deve falhar porque a sessão está fechada
+    E a sessão deve estar preservada como expirada
+
+  Cenário: Vários clientes abrem sessões simultaneamente
+    Quando cem clientes enviarem mensagens simultaneamente
+    Então todos os clientes devem possuir sessões abertas e isoladas
 
   Cenário: O fechamento manual preserva a sessão para reengajamento
     Dado que o cliente possui uma sessão aberta
