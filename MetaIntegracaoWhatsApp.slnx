@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Meta.WhatsApp/Meta.WhatsApp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Meta.WhatsApp.Specs/Meta.WhatsApp.Specs.csproj" />
+    <Project Path="tests/Meta.WhatsApp.Tests/Meta.WhatsApp.Tests.csproj" />
+  </Folder>
+</Solution>
