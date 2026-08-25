@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Meta.WhatsApp.Application</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Meta.WhatsApp.Domain/Meta.WhatsApp.Domain.csproj" />
+  </ItemGroup>
+</Project>

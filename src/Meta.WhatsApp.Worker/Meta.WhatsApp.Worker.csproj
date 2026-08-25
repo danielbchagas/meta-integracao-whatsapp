@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <RootNamespace>Meta.WhatsApp.Worker</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Meta.WhatsApp.Application/Meta.WhatsApp.Application.csproj" />
+    <ProjectReference Include="../Meta.WhatsApp.Infrastructure/Meta.WhatsApp.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

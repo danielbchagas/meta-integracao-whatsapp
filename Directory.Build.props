@@ -1,0 +1,13 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RepositoryTestProject>$([System.Text.RegularExpressions.Regex]::IsMatch('$(MSBuildProjectFullPath)', '[/\\]tests[/\\]'))</RepositoryTestProject>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RepositoryTestProject)' != 'True'">
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>
