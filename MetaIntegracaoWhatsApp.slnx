@@ -1,9 +1,25 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/Meta.WhatsApp/Meta.WhatsApp.csproj" />
+    <Project Path="src/Meta.WhatsApp.Client/Meta.WhatsApp.Client.csproj" />
+    <Project Path="src/Meta.WhatsApp.Api/Meta.WhatsApp.Api.csproj" />
+    <Project Path="src/Meta.WhatsApp.Application/Meta.WhatsApp.Application.csproj" />
+    <Project Path="src/Meta.WhatsApp.Domain/Meta.WhatsApp.Domain.csproj" />
+    <Project Path="src/Meta.WhatsApp.Infrastructure/Meta.WhatsApp.Infrastructure.csproj" />
+    <Project Path="src/Meta.WhatsApp.Sdk/Meta.WhatsApp.Sdk.csproj" />
+    <Project Path="src/Meta.WhatsApp.Worker/Meta.WhatsApp.Worker.csproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/Meta.WhatsApp.Specs/Meta.WhatsApp.Specs.csproj" />
-    <Project Path="tests/Meta.WhatsApp.Tests/Meta.WhatsApp.Tests.csproj" />
+    <Project Path="tests/Meta.WhatsApp.Api.Tests/Meta.WhatsApp.Api.Tests.csproj" />
+    <Project Path="tests/Meta.WhatsApp.Application.Tests/Meta.WhatsApp.Application.Tests.csproj" />
+    <Project Path="tests/Meta.WhatsApp.Client.Acceptance.Tests/Meta.WhatsApp.Client.Acceptance.Tests.csproj" />
+    <Project Path="tests/Meta.WhatsApp.Client.Tests/Meta.WhatsApp.Client.Tests.csproj" />
+    <Project Path="tests/Meta.WhatsApp.Domain.Tests/Meta.WhatsApp.Domain.Tests.csproj" />
+    <Project Path="tests/Meta.WhatsApp.Infrastructure.Tests/Meta.WhatsApp.Infrastructure.Tests.csproj" />
+    <Project Path="tests/Meta.WhatsApp.Sdk.Tests/Meta.WhatsApp.Sdk.Tests.csproj" />
+    <Project Path="tests/Meta.WhatsApp.Worker.Tests/Meta.WhatsApp.Worker.Tests.csproj" />
+  </Folder>
+  <Folder Name="/docs/">
+    <File Path="docs/plano-implementacao-whatsapp-meta-waba.md" />
+    <File Path="docs/matriz-testes-funcionais.md" />
   </Folder>
 </Solution>

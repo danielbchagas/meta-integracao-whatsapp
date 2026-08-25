@@ -1,34 +1,322 @@
 # Meta WhatsApp
 
-Class library em .NET 8 para encapsular o envio de mensagens pela WhatsApp Cloud API e a administração de templates pela Graph API da Meta.
+Solução .NET 8 para integrar sistemas com a WhatsApp Cloud API e a Graph API da Meta. O repositório contém um cliente de baixo nível distribuível como DLL, uma fachada de alto nível, uma API administrativa e um Worker para processamento assíncrono resiliente.
 
-## O que está incluído
+Os principais fluxos implementados são:
 
-- Um `MetaWhatsAppClient` reutilizável e seguro para uso concorrente.
-- Envio de texto, imagem, vídeo, áudio, documento, localização e templates.
-- `CustomMessageContent` para tipos novos ou avançados, como mensagens interativas.
-- Criação, consulta paginada e atualização de templates.
-- `EnsureTemplateAsync`, que cria o template ausente, não faz nada quando já está igual e atualiza somente quando categoria ou componentes mudaram.
-- Controle local da janela de atendimento aberta por uma mensagem recebida do cliente.
-- Reengajamento pelo mesmo número WhatsApp após o fechamento da janela, usando template aprovado.
-- Idempotência, cooldown e histórico de tentativas de reengajamento.
-- Detecção atômica de abertura, renovação e reativação por mensagens recebidas.
-- Deduplicação de webhooks recebidos e correlação opcional da resposta com o template enviado.
-- Validação HMAC de `X-Hub-Signature-256`, challenge de configuração e parser tipado de webhooks.
-- Atualização de entrega por webhooks sem reabrir incorretamente a janela.
-- Classificação de erros transitórios e exposição de `Retry-After` sem retries inseguros de mensagens.
-- Exceções com código, subcódigo e `fbtrace_id` retornados pela Meta.
-- Nenhuma dependência de ASP.NET ou de um contêiner de injeção de dependência.
+- cadastro e reconciliação de WABAs, números e templates;
+- listagem de templates aprovados disponíveis para uso;
+- criação, atualização e exclusão assíncronas de templates;
+- envio idempotente de texto livre, template textual e template com imagem;
+- geração de resumos em PNG, armazenamento no Blob e upload de mídia para a Meta;
+- Outbox/Inbox, Azure Service Bus, retry, backoff e limite de tentativas;
+- challenge, assinatura HMAC, parser e deduplicação de webhooks;
+- acompanhamento de estados `Sent`, `Delivered`, `Read` e falha definitiva;
+- reconciliação periódica de divergências com a Meta;
+- health checks, logs JSON e erros HTTP em `ProblemDetails`.
 
-## Projetos
+## Arquitetura
 
-- `src/Meta.WhatsApp`: class library `net8.0`.
-- `tests/Meta.WhatsApp.Tests`: testes do contrato HTTP, sessões, paginação e sincronização de templates.
-- `tests/Meta.WhatsApp.Specs`: especificações de negócio ReqNRoll em português.
+| Projeto | Responsabilidade | Consumido por |
+|---|---|---|
+| `Meta.WhatsApp.Client` | Cliente leve da Cloud/Graph API, sessões, reengajamento e primitivas de webhook | aplicações que desejam acesso direto; `Sdk` |
+| `Meta.WhatsApp.Domain` | Entidades, invariantes e máquinas de estado | `Application`, `Infrastructure` |
+| `Meta.WhatsApp.Application` | Casos de uso, estratégias e contratos de persistência/integração | `Infrastructure`, `Sdk`, `Worker` |
+| `Meta.WhatsApp.Infrastructure` | EF Core/SQL Server, Meta Graph API, Azure e renderização SkiaSharp | `Sdk`, `Worker` |
+| `Meta.WhatsApp.Sdk` | Fachada `IMetaWhatsAppSdk` e composição DI das camadas inferiores | `Api` e consumidores .NET de alto nível |
+| `Meta.WhatsApp.Api` | Endpoints HTTP de administração, mensagens e webhooks | clientes HTTP |
+| `Meta.WhatsApp.Worker` | Outbox, Service Bus, Inbox, processadores e reconciliação | processo hospedado |
+
+`Meta.WhatsApp.Client` e `Meta.WhatsApp.Sdk` têm propósitos diferentes. O Client não depende de EF Core ou Azure. O Sdk é a fachada de aplicação e referencia Client, Application e Infrastructure deliberadamente.
+
+Os namespaces públicos do cliente permanecem `Meta.WhatsApp.*`; o assembly e o pacote são `Meta.WhatsApp.Client`.
+
+## Estrutura do repositório
+
+```text
+src/
+  Meta.WhatsApp.Client/
+  Meta.WhatsApp.Domain/
+  Meta.WhatsApp.Application/
+  Meta.WhatsApp.Infrastructure/
+  Meta.WhatsApp.Sdk/
+  Meta.WhatsApp.Api/
+  Meta.WhatsApp.Worker/
+tests/
+  Meta.WhatsApp.Client.Tests/
+  Meta.WhatsApp.Client.Acceptance.Tests/
+  Meta.WhatsApp.Domain.Tests/
+  Meta.WhatsApp.Application.Tests/
+  Meta.WhatsApp.Infrastructure.Tests/
+  Meta.WhatsApp.Sdk.Tests/
+  Meta.WhatsApp.Api.Tests/
+  Meta.WhatsApp.Worker.Tests/
+docs/
+  plano-implementacao-whatsapp-meta-waba.md
+  matriz-testes-funcionais.md
+```
+
+O diretório `docs` e todos os projetos estão incluídos em `MetaIntegracaoWhatsApp.slnx` e aparecem na árvore da IDE.
+
+## Pré-requisitos
+
+- .NET SDK 8 ou mais recente compatível com `net8.0`;
+- SQL Server/Azure SQL para execução persistente;
+- Azure Key Vault para tokens e segredos;
+- Azure Service Bus com tópico e subscription;
+- Azure Blob Storage para mídias renderizadas;
+- identidade com permissões nos recursos Azure;
+- uma WABA e um app Meta para chamadas reais.
+
+Os testes locais usam EF InMemory e doubles dos serviços externos; não exigem contas Azure ou Meta.
+
+## Início rápido
+
+Restaure, compile e execute todos os testes:
+
+```powershell
+dotnet restore MetaIntegracaoWhatsApp.slnx
+dotnet build MetaIntegracaoWhatsApp.slnx --no-restore
+dotnet test MetaIntegracaoWhatsApp.slnx --no-build
+```
+
+Aplique as migrations usando a connection string padrão de desenvolvimento ou `WHATSAPP_SQL_CONNECTION`:
+
+```powershell
+$env:WHATSAPP_SQL_CONNECTION = "Server=(localdb)\mssqllocaldb;Database=WhatsAppMessaging;Trusted_Connection=True;TrustServerCertificate=True"
+dotnet ef database update --project src/Meta.WhatsApp.Infrastructure/Meta.WhatsApp.Infrastructure.csproj
+```
+
+Execute API e Worker em terminais separados:
+
+```powershell
+dotnet run --project src/Meta.WhatsApp.Api/Meta.WhatsApp.Api.csproj
+dotnet run --project src/Meta.WhatsApp.Worker/Meta.WhatsApp.Worker.csproj
+```
 
 ## Configuração
 
-O token deve ter `whatsapp_business_messaging` para envio e `whatsapp_business_management` para administrar templates. Não grave o token no código-fonte; obtenha-o de um secret manager ou variável de ambiente.
+API e Worker usam as mesmas seções de configuração:
+
+```json
+{
+  "ConnectionStrings": {
+    "WhatsApp": "Server=(localdb)\\mssqllocaldb;Database=WhatsAppMessaging;Trusted_Connection=True;TrustServerCertificate=True"
+  },
+  "Meta": {
+    "GraphApiBaseUrl": "https://graph.facebook.com/",
+    "ApiVersion": "v23.0"
+  },
+  "KeyVault": {
+    "VaultUri": "https://meu-vault.vault.azure.net/",
+    "SecretCacheMinutes": 5
+  },
+  "ServiceBus": {
+    "FullyQualifiedNamespace": "meu-bus.servicebus.windows.net",
+    "TopicName": "whatsapp-events",
+    "SubscriptionName": "whatsapp-worker",
+    "MaxConcurrentCalls": 8,
+    "MaxDeliveryCount": 10
+  },
+  "Storage": {
+    "ServiceUri": "https://minhaconta.blob.core.windows.net/",
+    "Container": "whatsapp-media"
+  },
+  "Workers": {
+    "OutboxBatchSize": 50,
+    "PollIntervalSeconds": 2,
+    "ClaimTimeoutSeconds": 120,
+    "MaxAttempts": 10,
+    "ReconciliationIntervalMinutes": 15
+  },
+  "Webhook": {
+    "VerifyTokenSecretKey": "meta-webhook-verify-token",
+    "AppSecretSecretKey": "meta-app-secret"
+  }
+}
+```
+
+Em ambientes hospedados, prefira variáveis de ambiente:
+
+```text
+ConnectionStrings__WhatsApp
+Meta__GraphApiBaseUrl
+Meta__ApiVersion
+KeyVault__VaultUri
+ServiceBus__FullyQualifiedNamespace
+ServiceBus__TopicName
+ServiceBus__SubscriptionName
+Storage__ServiceUri
+Storage__Container
+Webhook__VerifyTokenSecretKey
+Webhook__AppSecretSecretKey
+```
+
+### Credenciais e segredos
+
+O cadastro de uma WABA recebe `credentialKey`, que é o nome do secret do access token no Key Vault. O token não é salvo no SQL, em eventos, logs ou arquivos de configuração.
+
+Os secrets indicados por `Webhook:VerifyTokenSecretKey` e `Webhook:AppSecretSecretKey` também devem existir no Key Vault. A implementação usa `DefaultAzureCredential`, cacheia secrets por cinco minutos por padrão e não exige client secret quando Managed Identity ou credencial federada estiver configurada.
+
+Permissões mínimas esperadas:
+
+- Key Vault Secrets User para leitura dos secrets;
+- Azure Service Bus Data Sender/Receiver;
+- Storage Blob Data Contributor;
+- acesso do serviço à base SQL;
+- permissões Meta `whatsapp_business_messaging` e `whatsapp_business_management`.
+
+## API HTTP
+
+### Endpoints
+
+| Método | Rota | Resultado |
+|---|---|---|
+| `POST` | `/api/wabas` | cadastra, valida e sincroniza uma WABA |
+| `GET` | `/api/wabas/{wabaId}` | consulta a WABA |
+| `GET` | `/api/wabas/{wabaId}/phone-numbers` | lista números sincronizados |
+| `GET` | `/api/wabas/{wabaId}/templates` | lista todos os templates locais |
+| `GET` | `/api/wabas/{wabaId}/templates/available` | lista apenas templates `APPROVED` e seus `messageTypes` habilitados |
+| `GET` | `/api/wabas/{wabaId}/templates/{templateId}` | consulta um template |
+| `POST` | `/api/wabas/{wabaId}/templates` | enfileira criação e retorna `202` |
+| `PUT` | `/api/wabas/{wabaId}/templates/{templateId}` | enfileira atualização e retorna `202` |
+| `DELETE` | `/api/wabas/{wabaId}/templates/{templateId}` | enfileira exclusão e retorna `202` |
+| `GET` | `/api/operations/{operationId}` | consulta uma operação assíncrona |
+| `POST` | `/api/messages` | enfileira uma mensagem; exige `Idempotency-Key` |
+| `GET` | `/api/messages/{messageId}` | consulta estado e IDs da mensagem |
+| `GET` | `/webhooks/meta` | valida o challenge da Meta |
+| `POST` | `/webhooks/meta` | autentica e registra eventos recebidos |
+| `GET` | `/health/live` | liveness sem dependências externas |
+| `GET` | `/health/ready` | readiness do SQL, sem chamar a Meta |
+
+### Cadastrar uma WABA
+
+```http
+POST /api/wabas
+Content-Type: application/json
+X-Correlation-Id: 11111111-1111-1111-1111-111111111111
+
+{
+  "wabaId": "123456789",
+  "credentialKey": "meta-waba-producao-token"
+}
+```
+
+O serviço valida o ID na Meta, busca números/templates em paralelo e persiste o snapshot e o evento de outbox na mesma unidade transacional.
+
+### Listar templates disponíveis
+
+```http
+GET /api/wabas/123456789/templates/available
+```
+
+Exemplo de resposta:
+
+```json
+[
+  {
+    "id": "95a9da10-747c-41d0-9754-c251d0037fe1",
+    "metaTemplateId": "987654321",
+    "name": "proposta_aprovada",
+    "language": "pt_BR",
+    "category": "UTILITY",
+    "messageTypes": ["PROPOSTA_APROVADA"]
+  }
+]
+```
+
+Templates aprovados sem uma definição interna habilitada também são retornados, com `messageTypes` vazio.
+
+### Enviar uma mensagem
+
+```http
+POST /api/messages
+Content-Type: application/json
+Idempotency-Key: pedido:123:aviso
+X-Correlation-Id: 22222222-2222-2222-2222-222222222222
+
+{
+  "wabaId": "123456789",
+  "phoneNumberId": "456789123",
+  "messageType": "AVISO_SIMPLES",
+  "recipient": "5511999990000",
+  "data": {
+    "text": "Seu pedido foi aprovado.",
+    "previewUrl": false
+  }
+}
+```
+
+A primeira requisição cria mensagem, operação e outbox. Repetir a mesma `Idempotency-Key` retorna o registro existente com `duplicate: true`, sem um segundo envio.
+
+Definições iniciais:
+
+| Código | Estratégia | Template | Renderer | Habilitado |
+|---|---|---|---|---|
+| `AVISO_SIMPLES` | `FreeText` | — | — | sim |
+| `PROPOSTA_APROVADA` | `TextTemplate` | `proposta_aprovada` | — | sim |
+| `RESUMO_PROPOSTAS` | `ImageTemplate` | `resumo_propostas` | `proposal-summary` | sim |
+| `RESUMO_VEICULOS` | `ImageTemplate` | `resumo_veiculos` | `vehicle-summary` | não |
+
+Mensagens baseadas em template só são aceitas quando o template correspondente está sincronizado como `APPROVED`.
+
+### Criar template
+
+```http
+POST /api/wabas/123456789/templates
+Content-Type: application/json
+
+{
+  "name": "pedido_aprovado",
+  "language": "pt_BR",
+  "category": "UTILITY",
+  "components": [
+    { "type": "BODY", "text": "Olá {{1}}, seu pedido foi aprovado." }
+  ]
+}
+```
+
+Operações de escrita retornam `202 Accepted` e uma URL em `Location`. Consulte `/api/operations/{operationId}` até `Succeeded`, `Failed` ou `FailedPermanent`.
+
+### Webhook
+
+O challenge usa `hub.mode`, `hub.verify_token` e `hub.challenge`. O `POST` exige `X-Hub-Signature-256: sha256=<hmac>` calculado sobre os bytes exatos do corpo com o App Secret.
+
+- assinatura inválida: `401`;
+- payload autenticado, mas malformado: `400`;
+- evento novo registrado: `200` com `accepted`;
+- repetição do mesmo evento: `200` com `duplicates`.
+
+## Uso da fachada `Meta.WhatsApp.Sdk`
+
+Em uma aplicação .NET com DI:
+
+```csharp
+using Meta.WhatsApp.Sdk;
+
+services.AddMetaWhatsAppSdk(configuration);
+```
+
+Injete `IMetaWhatsAppSdk` para expor os casos de uso sem depender dos handlers concretos:
+
+```csharp
+using Meta.WhatsApp.Application.Messages;
+using Meta.WhatsApp.Sdk;
+
+public sealed class Notifications(IMetaWhatsAppSdk whatsApp)
+{
+    public Task<SendNotificationResult> SendAsync(
+        SendNotificationCommand command,
+        CancellationToken cancellationToken) =>
+        whatsApp.SendNotificationAsync(command, cancellationToken);
+}
+```
+
+A fachada oferece cadastro/consulta de WABA, números, templates disponíveis, ciclo assíncrono de templates, envio/consulta de mensagens, operações e ingestão de payloads de webhook.
+
+## Uso direto de `Meta.WhatsApp.Client`
+
+Use o Client quando a aplicação precisa chamar a Meta diretamente e gerenciar localmente a janela de atendimento, sem a arquitetura SQL/Azure desta solução.
 
 ```csharp
 using Meta.WhatsApp;
@@ -36,262 +324,141 @@ using Meta.WhatsApp.Sessions;
 
 var options = new MetaWhatsAppOptions
 {
-    AccessToken = configuration["Meta:AccessToken"]!,
-    PhoneNumberId = configuration["Meta:PhoneNumberId"]!,
-    BusinessAccountId = configuration["Meta:BusinessAccountId"]!,
-    // Fixe deliberadamente a versão adotada pela aplicação e atualize-a de forma controlada.
-    GraphApiVersion = configuration["Meta:GraphApiVersion"]!, // por exemplo, "v23.0"
-    ReengagementCooldown = TimeSpan.FromMinutes(5),
-    MaxReengagementHistory = 20,
-    MaxInboundMessageHistory = 100
+    AccessToken = accessToken,
+    PhoneNumberId = phoneNumberId,
+    BusinessAccountId = wabaId,
+    GraphApiVersion = "v23.0",
+    ReengagementCooldown = TimeSpan.FromMinutes(5)
 };
 
 var client = new MetaWhatsAppClient(
     httpClient,
     options,
     new InMemoryConversationSessionStore());
-```
 
-O `HttpClient` deve ter ciclo de vida longo ou ser criado por `IHttpClientFactory` no projeto consumidor. A biblioteca não altera `BaseAddress` nem cabeçalhos padrão do objeto recebido.
-
-## Sessões e janela de atendimento
-
-A Meta não entrega um ID de sessão que possa ser enviado novamente. A janela de atendimento é associada ao destinatário e é renovada quando chega uma nova mensagem dele. O projeto representa essa janela localmente e guarda também o último `message_id` recebido.
-
-Ao processar o webhook da Meta, registre a mensagem recebida:
-
-```csharp
 await client.RegisterInboundMessageAsync(new InboundMessage(
-    Recipient: webhookMessage.From,
-    MessageId: webhookMessage.Id,
-    ReceivedAtUtc: webhookMessage.Timestamp));
-```
-
-Quando a aplicação precisa reagir à mudança de estado, use a versão detalhada. O resultado é calculado atomicamente pelo store e pode ser `Opened`, `Renewed`, `Reactivated`, `Duplicate` ou `IgnoredOutOfOrder`:
-
-```csharp
-var registration = await client.RegisterInboundMessageWithResultAsync(new InboundMessage(
-    Recipient: webhookMessage.From,
-    MessageId: webhookMessage.Id,
-    ReceivedAtUtc: webhookMessage.Timestamp,
-    ContextMessageId: webhookMessage.Context?.Id));
-
-if (registration.WasReactivated)
-{
-    await eventPublisher.PublishAsync(new SessionReactivated(
-        registration.Session.ChannelId,
-        registration.Session.Recipient,
-        registration.Session.ExpiresAtUtc));
-}
-```
-
-`ContextMessageId` é opcional. Quando a resposta referencia diretamente um template de reengajamento enviado, `IsReplyToReengagement` será verdadeiro e `MatchedReengagementAttempt` identificará a tentativa correspondente. Uma nova mensagem digitada pelo cliente também reabre a janela, mesmo sem essa correlação explícita.
-
-Notificações repetidas com o mesmo `MessageId` retornam `Duplicate` e não produzem outra reativação. Mensagens anteriores à última já processada retornam `IgnoredOutOfOrder`. A aplicação deve publicar seu evento de negócio somente para o resultado `Reactivated`.
-
-### Endpoint de webhook
-
-A biblioteca não depende de ASP.NET, mas fornece a validação e o processamento usados pelo endpoint hospedeiro. Leia o corpo como bytes e não o normalize antes de validar a assinatura:
-
-```csharp
-using Meta.WhatsApp.Webhooks;
-
-var result = await client.ProcessWebhookAsync(
-    payloadBytes,
-    signatureHeader, // X-Hub-Signature-256
-    configuration["Meta:AppSecret"]!,
-    cancellationToken);
-
-foreach (var registration in result.InboundRegistrations)
-{
-    if (registration.WasReactivated)
-    {
-        await eventPublisher.PublishAsync(new SessionReactivated(
-            registration.Session.ChannelId,
-            registration.Session.Recipient,
-            registration.Session.ExpiresAtUtc));
-    }
-}
-```
-
-`ProcessWebhookAsync` valida a assinatura em tempo constante, interpreta `messages` e `statuses`, processa somente notificações do `ChannelId` configurado e informa quantas foram ignoradas. Para uma WABA com vários números, também é possível chamar `MetaWebhookParser.Parse`, usar `ChannelId` para selecionar o client correto e então processar a notificação tipada.
-
-No `GET` de configuração do webhook, valide `hub.mode`, `hub.verify_token` e devolva o challenge somente quando `MetaWebhookChallengeVerifier.TryVerify` retornar `true`. Guarde tanto o verify token quanto o App Secret em um secret manager.
-
-As mensagens livres seguintes consultam a mesma sessão e, por padrão, usam o último `message_id` como contexto de resposta:
-
-```csharp
-await client.SendTextMessageAsync("5511999990000", "Como posso ajudar?");
-await client.SendTextMessageAsync("5511999990000", "Tenho mais uma informação.");
-```
-
-Fora da janela (24 horas por padrão), uma mensagem livre lança `ConversationSessionClosedException`. A sessão é preservada como `Expired`, permitindo um novo contato pelo mesmo canal. Para não exibir o contexto de resposta no WhatsApp durante uma janela aberta, configure `AttachReplyContextToOpenSession = false`; a validação da janela continua ativa.
-
-`InMemoryConversationSessionStore` pode ser compartilhado por vários clients dentro do mesmo processo. Em produção com múltiplas réplicas, implemente `IConversationSessionStore` usando Redis ou banco compartilhado e preserve a atomicidade indicada pelos métodos de registro, reserva e atualização da interface. O histórico de IDs recebidos deve ser persistido junto da sessão para manter a deduplicação entre réplicas.
-
-As sessões são isoladas pela combinação `PhoneNumberId + Recipient`. Um mesmo canal pode manter conversas abertas com vários clientes simultaneamente, e o mesmo destinatário em dois números WhatsApp diferentes não compartilha estado. O store em memória é thread-safe; stores distribuídos devem manter essa atomicidade por chave.
-
-### Reengajamento após o fechamento
-
-O reengajamento exige que já exista uma sessão expirada para a combinação `PhoneNumberId + Recipient`. O client consulta a Meta e só envia um template cujo estado seja `APPROVED`:
-
-```csharp
-var result = await client.ReengageAsync(new ReengagementRequest(
     Recipient: "5511999990000",
-    TemplateName: "retomar_atendimento",
-    LanguageCode: "pt_BR",
-    IdempotencyKey: $"retomar-atendimento:{atendimentoId}",
-    Components:
-    [
-        new TemplateMessageComponent
-        {
-            Type = "body",
-            Parameters =
-            [
-                new TemplateMessageParameter { Type = "text", Text = "Daniel" }
-            ]
-        }
-    ]));
-```
+    MessageId: "wamid.inbound",
+    ReceivedAtUtc: DateTimeOffset.UtcNow));
 
-A chave de idempotência deve identificar a operação de negócio e ser reutilizada em retries. Uma chamada repetida com a mesma chave não envia outra mensagem. Uma chave diferente durante o cooldown lança `ReengagementCooldownException`.
-
-O envio bem-sucedido muda a sessão para `ReengagementPending`, mas não abre uma nova janela de texto livre. Eventos `sent`, `delivered`, `read` e `failed` do webhook podem ser registrados assim:
-
-```csharp
-await client.RegisterReengagementStatusAsync(new ReengagementStatusUpdate(
-    Recipient: webhookStatus.RecipientId,
-    MessageId: webhookStatus.Id,
-    Status: ReengagementMessageStatus.Delivered,
-    OccurredAtUtc: webhookStatus.Timestamp));
-```
-
-Somente o registro de uma mensagem recebida do cliente muda a sessão novamente para `Open`. `RegisterInboundMessageWithResultAsync` retorna `Reactivated` nessa transição. O template de reengajamento é enviado pelo mesmo `PhoneNumberId` e sem reutilizar o contexto vencido.
-
-Antes de iniciar contatos, a aplicação consumidora deve garantir o opt-in aplicável e a categoria correta do template conforme as políticas da Meta.
-
-### Falhas transitórias e retry
-
-`MetaWhatsAppApiException` expõe `IsTransient` para `408`, `429` e respostas `5xx`, além de `RetryAfter` quando a Meta devolver esse cabeçalho. A biblioteca deliberadamente não repete automaticamente envios `POST`: uma falha observada pelo cliente não garante que a Meta deixou de aceitar a mensagem, portanto um retry cego pode duplicar o contato. A aplicação deve usar idempotência de negócio, consultar os webhooks de status e aplicar backoff antes de uma nova tentativa.
-
-## Envio de mensagens
-
-Template fora da janela de atendimento:
-
-```csharp
-using Meta.WhatsApp.Messages;
-
-await client.SendTemplateMessageAsync(
+var sent = await client.SendTextMessageAsync(
     "5511999990000",
-    "pedido_confirmado",
-    "pt_BR",
-    [
-        new TemplateMessageComponent
-        {
-            Type = "body",
-            Parameters =
-            [
-                new TemplateMessageParameter { Type = "text", Text = "Daniel" },
-                new TemplateMessageParameter { Type = "text", Text = "12345" }
-            ]
-        }
-    ]);
+    "Olá! Como posso ajudar?",
+    previewUrl: false);
 ```
 
-Imagem dentro de uma sessão aberta:
+O `HttpClient` deve ter ciclo de vida longo ou ser criado por `IHttpClientFactory`. Para múltiplas réplicas, implemente `IConversationSessionStore` com armazenamento compartilhado; `InMemoryConversationSessionStore` é apropriado apenas para uma instância sem requisito de recuperação.
 
-```csharp
-await client.SendMessageAsync(new OutboundMessage(
-    "5511999990000",
-    new ImageMessageContent(
-        link: new Uri("https://cdn.example.com/comprovante.jpg"),
-        caption: "Seu comprovante")));
-```
+O Client também oferece:
 
-## Administração de templates
+- texto, imagem, vídeo, áudio, documento, localização e payload customizado;
+- envio e administração de templates;
+- `EnsureTemplateAsync` para criação/atualização condicional;
+- reengajamento idempotente com cooldown;
+- parser tipado, challenge e validação HMAC de webhooks;
+- código, subcódigo, `fbtrace_id` e `Retry-After` em erros Meta.
 
-```csharp
-using Meta.WhatsApp.Templates;
-
-var definition = new TemplateDefinition
-{
-    Name = "pedido_confirmado",
-    Language = "pt_BR",
-    Category = "UTILITY",
-    Components =
-    [
-        new TemplateComponent
-        {
-            Type = "BODY",
-            Text = "Olá {{1}}, o pedido {{2}} foi confirmado."
-        }
-    ]
-};
-
-var synchronization = await client.EnsureTemplateAsync(definition);
-// synchronization.Action: Created, Updated ou Unchanged
-
-var allTemplates = await client.GetTemplatesAsync();
-var templatesWithName = await client.GetTemplatesAsync("pedido_confirmado");
-```
-
-Criações são submetidas à análise da Meta. O endpoint de edição retorna apenas `success`; por isso, `TemplateSynchronizationResult.Status` é `null` após uma atualização. Consulte novamente o template pelo ID para obter o estado efetivo.
-
-## Checklist para produção
-
-- Registre `MetaWhatsAppClient` e `HttpClient` com ciclo de vida longo; configure timeout no projeto hospedeiro.
-- Use um `IConversationSessionStore` persistente e compartilhado quando houver reinício de processo ou múltiplas réplicas. O `InMemoryConversationSessionStore` é apropriado somente para uma instância sem requisito de recuperação.
-- Preserve a atomicidade de `RegisterInboundAsync`, incluindo o histórico de `MessageId`, e de `TryReserveReengagementAsync`.
-- Valide o challenge e `X-Hub-Signature-256` antes de processar qualquer webhook.
-- Use `MessageId` e `IdempotencyKey` como chaves idempotentes também na fila ou outbox do projeto consumidor.
-- Só devolva sucesso ao webhook depois de registrar duravelmente o evento ou colocá-lo em uma fila durável.
-- Monitore `MetaWhatsAppApiException.ErrorCode`, `TraceId`, `IsTransient`, `RetryAfter`, webhooks ignorados e sessões em `ReengagementPending`.
-- Armazene Access Token, App Secret e verify token em um secret manager e estabeleça rotação.
-
-## Build e testes
+Para empacotar a DLL/NuGet:
 
 ```powershell
-dotnet build MetaIntegracaoWhatsApp.slnx
+dotnet pack src/Meta.WhatsApp.Client/Meta.WhatsApp.Client.csproj -c Release
+```
+
+## Processamento assíncrono
+
+Fluxo de mensagem:
+
+```text
+API -> SQL (mensagem + operação + outbox)
+    -> OutboxPublisherWorker
+    -> Azure Service Bus
+    -> ServiceBusConsumerWorker + inbox
+    -> renderização/Blob/upload, quando necessário
+    -> Meta Graph API
+    -> webhook autenticado
+    -> inbox/outbox + atualização de status
+```
+
+Características operacionais:
+
+- claim da outbox com `UPDLOCK`, `READPAST` e `ROWLOCK` no SQL Server;
+- timeout de claim para recuperação após queda do Worker;
+- consumers idempotentes com Inbox;
+- backoff exponencial e suporte a `Retry-After`;
+- métodos HTTP inseguros não recebem retry automático do pipeline HTTP;
+- máximo de dez tentativas operacionais por padrão;
+- mensagens do Service Bus excedidas são enviadas à DLQ;
+- reconciliação periódica remove números/templates ausentes e cria versões apenas quando o hash muda.
+
+## Persistência
+
+O `WhatsAppDbContext` contém:
+
+- `whatsapp_waba`;
+- `whatsapp_phone_number`;
+- `whatsapp_template` e `whatsapp_template_version`;
+- `whatsapp_message_definition`;
+- `whatsapp_message`;
+- `whatsapp_rendered_media`;
+- `whatsapp_operation`;
+- `integration_outbox` e `integration_inbox`.
+
+Entidades com GUID recebem o identificador no domínio (`ValueGeneratedNever`). Agregados mutáveis usam `rowversion`, e índices únicos protegem chaves naturais e idempotência.
+
+## Testes
+
+```powershell
 dotnet test MetaIntegracaoWhatsApp.slnx
 ```
 
-Estado da validação desta versão:
+Estado atual:
 
-- Build `Release` com analisadores .NET habilitados, warnings tratados como erro e nenhum diagnóstico pendente.
-- 54 testes unitários.
-- 55 cenários ReqNRoll.
-- 109 testes aprovados no total.
-- Pacote NuGet validado com `dotnet pack src/Meta.WhatsApp/Meta.WhatsApp.csproj -c Release`.
+| Suíte | Casos |
+|---|---:|
+| Client unitários | 54 |
+| Client ReqNRoll | 55 |
+| Domain | 8 |
+| Application | 25 |
+| Infrastructure | 15 |
+| Sdk | 2 |
+| API | 7 |
+| Worker | 7 |
+| **Total** | **173** |
 
-### Especificações BDD com ReqNRoll
+Os cenários cobrem sucesso, validação, recurso inexistente, idempotência, duplicidade, estados inválidos, falha transitória, falha definitiva, paginação, contratos externos, renderização e webhooks.
 
-O projeto `tests/Meta.WhatsApp.Specs` executa cenários Gherkin em português usando ReqNRoll com xUnit. As features exercitam o client real contra um `HttpMessageHandler` determinístico, sem acessar a Meta durante os testes:
+Consulte [docs/matriz-testes-funcionais.md](docs/matriz-testes-funcionais.md) para a matriz completa e para as fronteiras que exigem Azure/Meta reais.
 
-- `CicloDaSessao.feature`: abertura, renovação, expiração, fechamento manual e isolamento por canal.
-- `EnvioDeMensagens.feature`: texto, template, mídias, localização, payload customizado, contexto e erros.
-- `Reengajamento.feature`: aprovação, idempotência, cooldown, falhas, resposta e concorrência.
-- `StatusDoReengajamento.feature`: `sent`, `delivered`, `read`, `failed` e eventos fora de ordem.
-- `RecebimentoDeWebhooks.feature`: assinatura, reativação autenticada e isolamento por canal.
-- `GestaoDeTemplates.feature`: consulta, paginação, criação e atualização condicional.
+## Containers
 
-Para executar apenas as especificações:
+Gere as imagens a partir da raiz do repositório:
 
 ```powershell
-dotnet test tests/Meta.WhatsApp.Specs/Meta.WhatsApp.Specs.csproj
+docker build -f src/Meta.WhatsApp.Api/Dockerfile -t meta-whatsapp-api .
+docker build -f src/Meta.WhatsApp.Worker/Dockerfile -t meta-whatsapp-worker .
 ```
 
-As tags `@sessao`, `@mensagens`, `@reengajamento`, `@webhooks` e `@templates` identificam cada grupo no explorador de testes e nos relatórios ReqNRoll.
+As imagens não contêm segredos. Injete configuração e identidade em tempo de execução.
 
-## Documentação oficial consultada
+## Checklist de produção
 
-- [WhatsApp Cloud API — Messages](https://www.postman.com/meta/whatsapp-business-platform/folder/o48mro7/messages)
-- [Webhook — objeto de mensagens recebidas](https://www.postman.com/meta/whatsapp-business-platform/folder/1dtuocp/messages-object)
-- [Webhook — referência de payload](https://www.postman.com/meta/whatsapp-business-platform/folder/tduohwq/webhook-payload-reference)
-- [Enviar mensagem de texto](https://www.postman.com/meta/whatsapp-business-platform/request/8gvd47s/send-text-message)
-- [Enviar template](https://www.postman.com/meta/whatsapp-business-platform/request/o65u5m5/send-message-template-text)
-- [WhatsApp Business Platform — Templates](https://www.postman.com/meta/whatsapp-business-platform/folder/lczy75a/templates)
-- [Listar templates](https://www.postman.com/meta/whatsapp-business-platform/request/hl0hxc0/get-all-templates-default-fields)
-- [Editar template](https://www.postman.com/meta/whatsapp-business-platform/request/bpcsm6i/edit-template)
-- [ReqNRoll — configuração de build](https://docs.reqnroll.net/latest/installation/configuring-build.html)
+- provisionar SQL, Service Bus, Blob e Key Vault em região compatível;
+- configurar Managed Identity e RBAC mínimo;
+- aplicar migrations antes de liberar tráfego;
+- criar tópico/subscription e política de DLQ;
+- cadastrar URL/challenge do webhook e validar HMAC;
+- fixar conscientemente a versão da Graph API;
+- manter a API e o Worker em múltiplas réplicas conforme a carga;
+- monitorar 429/5xx, operações permanentes, tamanho/idade da outbox, DLQ e reconciliação;
+- alertar para falhas de credencial, SQL, Blob e Service Bus;
+- definir retenção de mensagens, eventos e blobs;
+- nunca registrar access token, App Secret ou verify token.
 
-As coleções acima são publicadas pela própria Meta. A versão da Graph API não é fixada pela biblioteca: deve ser informada pelo consumidor para evitar uma atualização silenciosa de contrato.
+## Documentação adicional
+
+- [Plano de implementação](docs/plano-implementacao-whatsapp-meta-waba.md)
+- [Matriz de testes funcionais](docs/matriz-testes-funcionais.md)
+- [WhatsApp Cloud API — documentação oficial](https://developers.facebook.com/docs/whatsapp/cloud-api/)
+- [WhatsApp Business Platform — coleção oficial](https://www.postman.com/meta/whatsapp-business-platform/overview)
+- [EF Core migrations](https://learn.microsoft.com/ef/core/managing-schemas/migrations/)
+- [Azure Service Bus](https://learn.microsoft.com/azure/service-bus-messaging/)
